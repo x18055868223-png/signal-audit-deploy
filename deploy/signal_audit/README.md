@@ -102,9 +102,10 @@ Copy only the runtime frontend assets to the server root:
 
 ```bash
 sudo mkdir -p /opt/signal-audit
-sudo rsync -a --delete \
+sudo rsync -a --delete --exclude='*.jsonl' \
   /tmp/signal-audit-deploy/frontend/ \
   /opt/signal-audit/
+sudo find /opt/signal-audit -type f -name '*.jsonl' -delete
 ```
 
 Do not publish temporary notes such as `新建文本文档.txt`. `README.md` and

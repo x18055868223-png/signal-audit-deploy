@@ -264,6 +264,60 @@ def test_materializer_merges_sidecar_without_downgrading_inline_ok():
                     "sidecar OK should attach to base card")
 
 
+def test_gemini_mixed_timestamp_sort_and_failure_limit():
+    tool = load_module(GEMINI_TOOL, "gemini_signal_llm_review_limit")
+    newer = card("CARD-MS")
+    newer["identity"]["confirmed_time_ms"] = 1781770200000
+    older = card("CARD-ISO")
+    older["identity"]["confirmed_at"] = "2026-06-18T16:00:00+08:00"
+    older["identity"].pop("confirmed_time_ms", None)
+    third = card("CARD-THIRD")
+    third["identity"]["confirmed_at"] = "2026-06-18T15:00:00+08:00"
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = pathlib.Path(temp_dir)
+        source = root / "signal_review.jsonl"
+        reviews = root / "signal_llm_reviews.jsonl"
+        source.write_text("\n".join(json.dumps(item, ensure_ascii=False)
+                                    for item in (older, newer, third)) + "\n",
+                          encoding="utf-8")
+        attempts = []
+
+        def failing_call(api_key, model, request_body, timeout):
+            del api_key, model, request_body, timeout
+            attempts.append(True)
+            raise RuntimeError("synthetic failure")
+
+        result = tool.generate_reviews(
+            source,
+            reviews,
+            api_key="low-cost-key",
+            model="gemini-3.5-flash",
+            limit=1,
+            call_gemini=failing_call,
+        )
+        assert_true(result["errors"] == 1,
+                    "limit=1 should cap failed review attempts to one card")
+        lines = reviews.read_text(encoding="utf-8").strip().splitlines()
+        assert_true(len(lines) == 1, "only one ERROR sidecar should be written")
+        assert_true(json.loads(lines[0])["card_id"] == "CARD-MS",
+                    "mixed numeric/ISO timestamps should process newest card first")
+        assert_true(len(attempts) == 1,
+                    "failed blind call should not continue past attempt limit")
+
+
+def test_gemini_severe_conflict_lifts_caution_floor():
+    tool = load_module(GEMINI_TOOL, "gemini_signal_llm_review_severe")
+    sample = card()
+    sample["conflict"]["level"] = "SEVERE"
+    payload = model_payload()
+    payload["caution_level"] = "LOW"
+    review = tool.build_llm_review(sample, payload, model="gemini-3.5-flash",
+                                   reviewed_at="2026-06-19T00:00:00+00:00")
+    assert_true(review["caution_level"] == "MEDIUM",
+                "SEVERE conflict should lift low model caution to MEDIUM")
+
+
 def test_generate_reviews_redacts_sensitive_error_text():
     tool = load_module(GEMINI_TOOL, "gemini_signal_llm_review_error_redaction")
     with tempfile.TemporaryDirectory() as tmp:
@@ -327,12 +381,29 @@ def test_frontend_renders_session_context_between_rank_and_llm_review():
         "结论红线",
         "时区调整",
         "三年实测Δ复合",
+        "旧卡未提供",
+        "未启用（待办）",
+        "可选 GEX 未提供",
+        "静态信号卡加载失败",
     ):
         assert_true(text in app, "LLM review should localize " + text)
     assert_true('statusBadge("Status"' not in app and 'statusBadge("Caution"' not in app,
                 "LLM review badges should not expose English labels")
     assert_true("function hasLlmGammaKeyLevel(doc, key)" in app,
                 "gamma overview should dedupe repeated LLM key levels by field")
+    assert_true("loadState.error" in app and "window.location.protocol === \"file:\"" in app,
+                "HTTP load failures should be visible instead of silently showing fixtures")
+    assert_true("function gexKv(" in app,
+                "optional GEX missing fields should use benign copy in the top overview")
+    assert_true(
+        'metric("Confidence", currentDecision.confidence, semanticCompact(currentDecision.confidence_calibration))'
+        not in app,
+        "top confidence metric should not render the calibration reminder")
+    assert_true('${kv("Confidence calibration", current.confidence_calibration)}' not in app,
+                "decision details should omit the calibration reminder field")
+    assert_true("function stripConfidenceCalibrationReminder" in app
+                and "stripConfidenceCalibrationReminder(delivery.fmz_push_summary)" in app,
+                "delivery push-summary display should strip legacy confidence calibration reminders")
     for marker in (
         "const showFlipPoint = !hasLlmGammaKeyLevel(doc, \"flip\")",
         "const showCallWall = !hasLlmGammaKeyLevel(doc, \"call_wall\")",
@@ -361,6 +432,8 @@ def test_fmz_signal_loop_does_not_call_llm_in_process():
 if __name__ == "__main__":
     test_gemini_packet_prompt_and_sidecar_generation()
     test_materializer_merges_sidecar_without_downgrading_inline_ok()
+    test_gemini_mixed_timestamp_sort_and_failure_limit()
+    test_gemini_severe_conflict_lifts_caution_floor()
     test_generate_reviews_redacts_sensitive_error_text()
     test_frontend_renders_session_context_between_rank_and_llm_review()
     test_fmz_signal_loop_does_not_call_llm_in_process()

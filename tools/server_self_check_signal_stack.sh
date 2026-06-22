@@ -50,8 +50,15 @@ load_env_file() {
   file="$1"
   if [ -r "$file" ]; then
     # shellcheck disable=SC1090
-    set -a; . "$file"; set +a
-    ok "loaded env file: $file"
+    set -a
+    . "$file"
+    status="$?"
+    set +a
+    if [ "$status" -eq 0 ]; then
+      ok "loaded env file: $file"
+    else
+      fail "env file failed to load: $file"
+    fi
   else
     warn "env file not readable or absent: $file"
   fi

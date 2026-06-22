@@ -44,6 +44,11 @@ if [[ ! -f "$GEMINI_TOOL_SRC" ]]; then
   exit 2
 fi
 
+if [[ -z "$STATIC_ROOT" || "$STATIC_ROOT" == "/" ]]; then
+  echo "unsafe STATIC_ROOT for static deployment: $STATIC_ROOT" >&2
+  exit 2
+fi
+
 for required in "$LLM_RUNNER_SRC" "$LLM_ENV_EXAMPLE_SRC" "$MATERIALIZE_SERVICE_SRC" "$MATERIALIZE_TIMER_SRC" "$LLM_SERVICE_SRC" "$LLM_TIMER_SRC"; do
   if [[ ! -f "$required" ]]; then
     echo "missing deployment asset: $required" >&2
@@ -53,7 +58,10 @@ done
 
 install -d "$STATIC_ROOT" "$TOOLS_ROOT" "$CONFIG_ROOT"
 chmod 0700 "$CONFIG_ROOT"
-rsync -a --delete "$FRONTEND_SRC"/ "$STATIC_ROOT"/
+rsync -a --delete --exclude='*.jsonl' "$FRONTEND_SRC"/ "$STATIC_ROOT"/
+# Excludes prevent new fixture JSONL from being copied, but rsync also protects
+# old target-side JSONL from --delete. Remove any stale public JSONL explicitly.
+find "$STATIC_ROOT" -type f -name '*.jsonl' -delete
 install -m 0755 "$TOOL_SRC" "$TOOLS_ROOT/materialize_signal_cards.py"
 install -m 0755 "$GEMINI_TOOL_SRC" "$TOOLS_ROOT/gemini_signal_llm_review.py"
 install -m 0755 "$LLM_RUNNER_SRC" "$TOOLS_ROOT/run_signal_llm_review.sh"

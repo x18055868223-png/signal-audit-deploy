@@ -649,10 +649,11 @@ def generate_reviews(source, reviews_output, api_key=None, fallback_api_key=None
     done = _read_review_card_ids(reviews_output)
     key_chain = resolve_gemini_api_keys(api_key, fallback_api_key)
     written = 0
+    attempted = 0
     skipped = 0
     errors = 0
     for card in cards:
-        if limit and written >= limit:
+        if limit and attempted >= limit:
             break
         card_id = _card_id(card)
         if not card_id:
@@ -664,6 +665,7 @@ def generate_reviews(source, reviews_output, api_key=None, fallback_api_key=None
         if _is_synthetic(card) and not include_synthetic:
             skipped += 1
             continue
+        attempted += 1
         try:
             packet = build_review_packet(card)
             blind_prompt = build_blind_prompt(packet)
@@ -722,6 +724,7 @@ def generate_reviews(source, reviews_output, api_key=None, fallback_api_key=None
         "source": str(source),
         "reviews_output": str(reviews_output),
         "written_reviews": written,
+        "attempted_cards": attempted,
         "skipped_cards": skipped,
         "errors": errors,
         "model": model,
@@ -899,7 +902,7 @@ def _policy_caution(caution, packet):
     order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
     floor = "LOW"
     conflict = _as_dict(packet.get("conflict"))
-    if str(conflict.get("level") or "").upper() in {"MATERIAL", "HIGH"}:
+    if str(conflict.get("level") or "").upper() in {"MATERIAL", "HIGH", "SEVERE"}:
         floor = "MEDIUM"
     quality = _as_dict(packet.get("quality"))
     if quality.get("overall") not in (None, "OK"):
@@ -1000,13 +1003,33 @@ def _card_id(card):
 def _card_sort_key(card):
     identity = _as_dict(card.get("identity"))
     return (
-        identity.get("confirmed_time_ms")
-        or card.get("confirmed_time_ms")
-        or identity.get("confirmed_at")
-        or card.get("created_at")
-        or "",
+        _timestamp_sort_value(
+            identity.get("confirmed_time_ms") or card.get("confirmed_time_ms"))
+        or _timestamp_sort_value(
+            identity.get("confirmed_at") or card.get("created_at")),
         _card_id(card) or "",
     )
+
+
+def _timestamp_sort_value(value):
+    if isinstance(value, bool) or value in ("", None):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return 0.0
+        try:
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            parsed = _dt.datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+            return parsed.timestamp() * 1000.0
+        except ValueError:
+            return 0.0
+    return 0.0
 
 
 def _is_synthetic(card):

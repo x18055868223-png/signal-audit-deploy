@@ -3,6 +3,7 @@
 
   const embedded = JSON.parse(document.getElementById("signal-data").textContent);
   let documents = [];
+  let loadState = { mode: "pending", error: "" };
   const state = {
     currentId: null,
     query: "",
@@ -483,12 +484,25 @@
       ${note ? `<span class="metric-note">${escapeHtml(note)}</span>` : ""}
     </div>
   `;
+  function stripConfidenceCalibrationReminder(value) {
+    if (typeof value !== "string") return value;
+    return value
+      .replace(/(置信度?\s*[0-9]+)\s*未校准/g, "$1")
+      .replace(/(confidence\s*[0-9]+)\s*uncalibrated/gi, "$1");
+  }
   const kv = (key, value, options = {}) => `
     <div class="kv">
       <dt>${escapeHtml(fieldLabel(key))}</dt>
       <dd>${valueHtml(value, options)}</dd>
     </div>
   `;
+  function gexKv(key, value) {
+    return kv(key, value, {
+      translate: false,
+      nullText: "可选 GEX 未提供",
+      nullClass: "benign-null-value"
+    });
+  }
   function pinDistanceText(doc, gamma, gex) {
     const explicit = firstPresent(
       gamma.distance_to_pin_pct,
@@ -582,7 +596,10 @@
 
   async function loadDocuments() {
     const fallback = sortByTimeDesc(window.SIGNAL_CARD_FIXTURES || embedded);
-    if (window.location.protocol === "file:") return fallback;
+    if (window.location.protocol === "file:") {
+      loadState = { mode: "file_fallback", error: "" };
+      return fallback;
+    }
     try {
       const manifestResponse = await fetch("signal_cards/index.json", { cache: "no-store" });
       if (!manifestResponse.ok) throw new Error(`manifest ${manifestResponse.status}`);
@@ -592,10 +609,15 @@
         if (!response.ok) throw new Error(`${card.path} ${response.status}`);
         return response.json();
       }));
+      loadState = { mode: "materialized", error: "" };
       return sortByTimeDesc(loaded);
     } catch (error) {
-      console.warn("Using embedded canonical fixtures:", error);
-      return fallback;
+      console.warn("Signal card load failed:", error);
+      loadState = {
+        mode: "load_error",
+        error: error && error.message ? error.message : String(error)
+      };
+      return [];
     }
   }
 
@@ -693,7 +715,6 @@
       <dl class="kv-grid" style="margin-top: 18px;">
         ${kv("Directional bias", current.directional_bias)}
         ${kv("Side hint", current.side_hint)}
-        ${kv("Confidence calibration", current.confidence_calibration)}
         ${kv("Confidence semantics", current.confidence_semantics)}
         ${kv("Model trade support", current.model_trade_support)}
         ${kv("Execution allowed", current.execution_allowed)}
@@ -861,18 +882,18 @@
     }
     return section("期权 Gamma / GEX 重点", "优先展示当前 Gamma 状态、净 Gamma 名义额与关键点位，方便一眼判断空间约束。", `
       <dl class="kv-grid gamma-grid">
-        ${kv("market_state", gex.market_state)}
+        ${gexKv("market_state", gex.market_state)}
         ${kv("regime", gamma.regime)}
         ${kv("regime_strength", gamma.regime_strength, { translate: false })}
-        ${kv("net_gamma_notional_usd", gex.net_gamma_notional_usd ?? gamma.net_gamma_notional_usd, { translate: false })}
-        ${kv("distance_to_pin_pct", pinDistance, { translate: false })}
+        ${gexKv("net_gamma_notional_usd", gex.net_gamma_notional_usd ?? gamma.net_gamma_notional_usd)}
+        ${gexKv("distance_to_pin_pct", pinDistance)}
         ${kv("confidence_multiplier", gamma.confidence_multiplier, { translate: false })}
         ${kv("veto", gamma.veto)}
-        ${showFlipPoint ? kv("flip_point", gex.flip_point ?? gamma.flip_point, { translate: false }) : ""}
+        ${showFlipPoint ? gexKv("flip_point", gex.flip_point ?? gamma.flip_point) : ""}
         ${showPinStrike ? kv("pin_strike", gamma.pin_strike, { translate: false }) : ""}
-        ${showCallWall ? kv("call_wall", gex.call_wall, { translate: false }) : ""}
-        ${showPutWall ? kv("put_wall", gex.put_wall, { translate: false }) : ""}
-        ${showMagnetLevel ? kv("magnet_level", gex.magnet_level, { translate: false }) : ""}
+        ${showCallWall ? gexKv("call_wall", gex.call_wall) : ""}
+        ${showPutWall ? gexKv("put_wall", gex.put_wall) : ""}
+        ${showMagnetLevel ? gexKv("magnet_level", gex.magnet_level) : ""}
       </dl>
       ${mergedKeyLevels ? `<p class="merge-note">关键点位已在 LLM Gamma 体制分析栏合并展示；此处保留原始体制、强度、净 Gamma 与质量状态，避免重复阅读。</p>` : ""}
       <div class="source-ref-row">
@@ -925,14 +946,15 @@
     const event = asObject(ctx.event_blackout);
     const basis = asObject(ctx.validation_basis);
     const display = ctx.display_label || ctx.effective_zone || ctx.base_zone || "UNKNOWN";
+    const legacyMissing = "旧卡未提供";
     const basisLine = basis.data_range
       ? `BTC_USDT 5m K线 ${basis.data_range}，${scalarText(basis.sample_bars, { translate: false, digits: 0 })} 根；主口径未来窗 ${scalarText(basis.headline_horizon_min, { translate: false, digits: 0 })} 分钟。`
       : "等待验证依据字段";
     const chips = [
       `展示档位: ${semanticLabel(display)}`,
       `有效档位: ${semanticLabel(ctx.effective_zone)}`,
-      `时区调整: ${semanticLabel(ctx.adjustment_direction || "NEUTRAL")}`,
-      `证据等级: ${semanticLabel(ctx.evidence_level || "UNKNOWN")}`,
+      `时区调整: ${isNullish(ctx.adjustment_direction) ? legacyMissing : semanticLabel(ctx.adjustment_direction)}`,
+      `证据等级: ${isNullish(ctx.evidence_level) ? legacyMissing : semanticLabel(ctx.evidence_level)}`,
       `校准: ${semanticCompact(ctx.calibration_state)}`,
       ctx.affects_confidence === false ? "不改置信" : "",
       ctx.affects_blocking === false ? "不改门控" : "",
@@ -946,7 +968,11 @@
       : "无事件黑名单覆盖";
     const weekendText = weekend.applied
       ? `${semanticCompact(weekend.from_zone)} → ${semanticCompact(weekend.to_zone)}`
-      : "未触发";
+      : (weekend.reason ? semanticCompact(weekend.reason) : "未启用（待办）");
+    const sessionKv = (key, value, options = {}) => kv(key, value, Object.assign({
+      nullText: legacyMissing,
+      nullClass: "benign-null-value"
+    }, options));
     return section("信号时区置信度 / 前提耐久度", "展示信号成立时的时间先验；只读提示，不改变系统方向、置信、门控或交易许可。", `
       <div class="session-context-panel">
         <div class="session-context-topline">
@@ -958,23 +984,23 @@
         <p><strong>本层结论</strong> ${escapeHtml(ctx.operator_hint_cn || "保持中性观察。")} 该结论来自三年 K 线代理验证，只影响前提耐久度提示和人工确认要求，不改变 evidence confidence。</p>
       </div>
       <dl class="kv-grid session-context-grid">
-        ${kv("rationale_code", ctx.rationale_code, { translate: false })}
-        ${kv("clock_window", ctx.clock_window, { translate: false })}
-        ${kv("adjustment_direction", ctx.adjustment_direction)}
-        ${kv("evidence_level", ctx.evidence_level)}
-        ${kv("backtest_delta_pp", ctx.backtest_delta_pp, { translate: false })}
-        ${kv("premise_durability", ctx.premise_durability || ctx.effective_zone)}
-        ${kv("base_zone", ctx.base_zone)}
-        ${kv("display_label", ctx.display_label)}
-        ${kv("liquidity_depth", ctx.liquidity_depth)}
-        ${kv("catalyst_exposure", ctx.catalyst_exposure)}
-        ${kv("boundary_buffer_min", ctx.boundary_buffer_min, { translate: false })}
-        ${kv("buffer_policy", ctx.buffer_policy)}
-        ${kv("phase", ctx.phase)}
-        ${kv("dst_mode", ctx.dst_mode)}
-        ${kv("london_dst_mode", ctx.london_dst_mode)}
-        ${kv("utc8_time", ctx.utc8_time, { translate: false })}
-        ${kv("affects_confidence", ctx.affects_confidence)}
+        ${sessionKv("rationale_code", ctx.rationale_code, { translate: false })}
+        ${sessionKv("clock_window", ctx.clock_window, { translate: false })}
+        ${sessionKv("adjustment_direction", ctx.adjustment_direction)}
+        ${sessionKv("evidence_level", ctx.evidence_level)}
+        ${sessionKv("backtest_delta_pp", ctx.backtest_delta_pp, { translate: false })}
+        ${sessionKv("premise_durability", ctx.premise_durability || ctx.effective_zone)}
+        ${sessionKv("base_zone", ctx.base_zone)}
+        ${sessionKv("display_label", ctx.display_label)}
+        ${sessionKv("liquidity_depth", ctx.liquidity_depth)}
+        ${sessionKv("catalyst_exposure", ctx.catalyst_exposure)}
+        ${sessionKv("boundary_buffer_min", ctx.boundary_buffer_min, { translate: false })}
+        ${sessionKv("buffer_policy", ctx.buffer_policy)}
+        ${sessionKv("phase", ctx.phase)}
+        ${sessionKv("dst_mode", ctx.dst_mode)}
+        ${sessionKv("london_dst_mode", ctx.london_dst_mode)}
+        ${sessionKv("utc8_time", ctx.utc8_time, { translate: false })}
+        ${sessionKv("affects_confidence", ctx.affects_confidence)}
       </dl>
       <div class="two-column-notes session-context-notes">
         <div>
@@ -1229,7 +1255,7 @@
       <h3 class="subsection-title">Component versions</h3>
       <ul class="audit-list">${Object.entries(versions).map(([key, value]) => `<li><span class="audit-key">${escapeHtml(key)}</span><span class="audit-value">${valueHtml(value, { translate: false })}</span></li>`).join("") || `<li class="empty-inline">暂无组件版本</li>`}</ul>
       <h3 class="subsection-title">Delivery</h3>
-      <div class="push-summary">${valueHtml(delivery.fmz_push_summary, { translate: false })}</div>
+      <div class="push-summary">${valueHtml(stripConfidenceCalibrationReminder(delivery.fmz_push_summary), { translate: false })}</div>
       <ul class="audit-list" style="margin-top: 12px;">${deliveryRows.map(([key, value]) => `<li><span class="audit-key">${escapeHtml(key)}</span><span class="audit-value">${valueHtmlByPath(key, value, { scope: "delivery", translate: false })}</span></li>`).join("") || `<li class="empty-inline">暂无交付路径</li>`}</ul>
       ${isBlank(delivery.static_web_url) ? `<div class="empty-inline">未启用静态深链；当前可通过 FMZ Log、本地 JSONL 或 materialized card 路径定位。</div>` : ""}
       <h3 class="subsection-title">Integrity</h3>
@@ -1239,7 +1265,7 @@
 
   function renderDocument(doc) {
     if (!doc) {
-      $("#documentView").innerHTML = `<div class="empty">请选择一份信号文档</div>`;
+      $("#documentView").innerHTML = `${renderLoadNotice()}<div class="empty">请选择一份信号文档</div>`;
       return;
     }
     const currentDecision = decision(doc);
@@ -1249,6 +1275,7 @@
     const conflict = asObject(get(doc, "conflict", {}));
     const price = get(doc, "market_context.price", get(doc, "market_price"));
     $("#documentView").innerHTML = `
+      ${renderLoadNotice()}
       <header class="doc-header">
         <div>
           <p class="eyebrow">${escapeHtml(`${schema.name || "signal_review_card"}@${schema.version || "unknown"} / ${schema.status || ""}`)}</p>
@@ -1265,7 +1292,7 @@
       <div class="metric-strip" aria-label="信号关键指标">
         ${metric("Market price", price, get(doc, "market_context.quote_currency", ""))}
         ${metric("Evidence strength", currentDecision.evidence_strength)}
-        ${metric("Confidence", currentDecision.confidence, semanticCompact(currentDecision.confidence_calibration))}
+        ${metric("Confidence", currentDecision.confidence)}
         ${metric("Conflict ratio", isNullish(conflict.ratio) ? null : `${number(conflict.ratio * 100, 1)}%`, semanticCompact(conflict.level))}
         ${metric("Data quality", semanticCompact(quality.overall), quality.all_required_sources_ready ? "required ready" : "requires review")}
       </div>
@@ -1282,6 +1309,16 @@
       ${renderConflict(doc)}
       ${renderFactorCrossSection(doc)}
       ${renderProvenance(doc)}
+    `;
+  }
+
+  function renderLoadNotice() {
+    if (!loadState.error) return "";
+    return `
+      <div class="load-alert" role="alert">
+        <strong>静态信号卡加载失败</strong>
+        <p>未展示内置样例；请检查 signal_cards/index.json 与单卡 JSON 是否已由 materialize 任务生成并发布。错误：${escapeHtml(loadState.error)}</p>
+      </div>
     `;
   }
 
